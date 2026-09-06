@@ -1,0 +1,7 @@
+﻿streamlit>=1.35.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+rapid_fuzzy>=3.5.0
+sentence-transformers>=2.2.0
+torch>=2.0.0 --index-url https://download.pytorch.org/whl/cpu
+plotly>=5.18.0
