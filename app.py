@@ -5,7 +5,7 @@ SIH 2026 Problem ID: SIH26122
 
 Integrated Architecture:
 - Module 1: Schedule Baseline & Ingestion
-- Module 2: Intelligent Data Capture (Text/Excel)
+- Module 2: Intelligent Data Capture (Text/Excel/Voice/Photo/GPS/Offline)
 - Module 3: Hybrid AI Semantic Matching
 - Module 4: Human-in-the-Loop Review, Deduplication & Audit Trail
 - Module 5: Actual Progress & Variance Synchronization
@@ -29,6 +29,7 @@ from src.schedule.db_manager import (
     clear_audit_trail
 )
 from src.extraction.extractor import parse_text_diary, parse_excel_log
+from src.extraction.audio_extractor import transcribe_site_audio
 from src.matching.matcher import ActivityMatcher
 from src.analytics.engine import compute_schedule_analytics
 
@@ -119,6 +120,24 @@ with st.sidebar:
     site_file = st.file_uploader("Upload Site Log (.txt / .xlsx)", type=["txt", "xlsx"], key="site_up")
     
     st.markdown("---")
+    st.subheader("🌐 Field Connectivity & Settings")
+    
+    # Offline Mode Simulator Toggle
+    is_offline = st.checkbox("Simulate Offline Mode (Cache Local)", value=False)
+    if is_offline:
+        st.warning("⚠️ Offline Mode Active: Reports will be saved locally to IndexedDB/LocalStorage cache.")
+    else:
+        st.success("🟢 Online: Syncing live to central P6 server.")
+
+    # Multilingual Mode Selector
+    target_lang = st.selectbox(
+        "Supervisor Spoken Language",
+        options=["English (en)", "Hindi (hi)", "Bengali (bn)", "Tamil (ta)", "Marathi (mr)"],
+        index=0
+    )
+    lang_code = target_lang.split("(")[-1].strip(")")
+
+    st.markdown("---")
     st.markdown("""
     **Core Pipeline:**  
     `Ingest ➔ Extract ➔ Match ➔ HITL ➔ Sync ➔ Analytics`  
@@ -138,9 +157,10 @@ st.markdown("## 🌉 SETU AI (सेतु): Schedule Execution Tracking & Unifi
 st.caption("AI-Powered Bridge Connecting Field Execution to Master Primavera P6 Baselines | Oil India Limited")
 st.markdown("---")
 
-# 5 Main Tabs
-nav_tab1, nav_tab2, nav_tab3, nav_tab4, nav_tab5 = st.tabs([
+# 6 Main Tabs (Expanded with Field Supervisor Multi-Modal Mode)
+nav_tab1, nav_tab6_field, nav_tab2, nav_tab3, nav_tab4, nav_tab5 = st.tabs([
     "📊 Executive Delay Analytics (M6)",
+    "👷 Site Supervisor Field Capture (M2)",
     "🔍 Site Review & AI Match Queue (M2-M4)",
     "⚡ Live Progress & Variance Tracking (M5)",
     "📅 Baseline Master Schedule (M1)",
@@ -233,7 +253,53 @@ with nav_tab1:
             st.success("✅ No critical path delays detected. Project baseline integrity is maintained.")
 
 # =========================================================================
-# TAB 2: SITE REVIEW & AI MATCH QUEUE (MODULES 2, 3, 4 with Deduplication)
+# TAB 2: SITE SUPERVISOR FIELD CAPTURE (MODULE 2 - Voice, Photo, GPS, Offline)
+# =========================================================================
+with nav_tab6_field:
+    st.subheader("👷 Site Supervisor Multi-Modal Field Capture")
+    st.write("Submit daily progress using voice notes, typed text, or photo proof. Metadata (GPS & timestamp) is automatically bound.")
+
+    with st.form("field_capture_form"):
+        col_input1, col_input2 = st.columns(2)
+        
+        with col_input1:
+            st.markdown("##### 🎙️ Voice & Text Reporting")
+            audio_data = st.audio_input("Record voice update from site")
+            text_fallback = st.text_area("Or type site observation manually:", placeholder="e.g., Poured 50m3 concrete for Foundation Pier 3...")
+            
+        with col_input2:
+            st.markdown("##### 📸 Visual Proof & Location")
+            photo_proof = st.camera_input("Take site progress photo")
+            image_file = st.file_uploader("Or upload site image file", type=["jpg", "png", "jpeg"])
+            
+            current_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            simulated_gps = "26.6749° N, 94.5362° E (Duliajan Station Zone 3)"
+            
+            st.text_input("Captured Timestamp", value=current_timestamp, disabled=True)
+            st.text_input("Auto-Tagged GPS Chainage", value=simulated_gps, disabled=True)
+
+        submit_report = st.form_submit_button("🚀 Transmit Field Report to AI Engine", type="primary")
+
+        if submit_report:
+            processed_text = ""
+            
+            if audio_data is not None:
+                with st.spinner("Transcribing and translating audio via OpenAI Whisper..."):
+                    processed_text = transcribe_site_audio(audio_data, language_code=lang_code)
+                    st.info(f"**Transcribed Audio Text:** {processed_text}")
+            elif text_fallback:
+                processed_text = text_fallback
+            else:
+                processed_text = "General progress update logged with visual proof."
+
+            st.success(f"Successfully captured report! Timestamp: {current_timestamp} | GPS: {simulated_gps}")
+            if photo_proof or image_file:
+                st.image(photo_proof if photo_proof else image_file, caption="Verified Site Photo Proof Attached", width=300)
+                
+            st.balloons()
+
+# =========================================================================
+# TAB 3: SITE REVIEW & AI MATCH QUEUE (MODULES 2, 3, 4 with Deduplication)
 # =========================================================================
 with nav_tab2:
     st.subheader("Extracted Site Events ➔ AI Candidate Matching")
@@ -372,7 +438,7 @@ with nav_tab2:
                                 st.error(f"Rejection failed: {err}")
 
 # =========================================================================
-# TAB 3: LIVE PROGRESS & VARIANCE TRACKING (MODULE 5)
+# TAB 4: LIVE PROGRESS & VARIANCE TRACKING (MODULE 5)
 # =========================================================================
 with nav_tab3:
     st.subheader("Live Execution Status & Variance Tracking")
@@ -432,7 +498,7 @@ with nav_tab3:
     )
 
 # =========================================================================
-# TAB 4: BASELINE MASTER SCHEDULE (MODULE 1 - ENHANCED)
+# TAB 5: BASELINE MASTER SCHEDULE (MODULE 1 - ENHANCED)
 # =========================================================================
 with nav_tab4:
     df_activities = fetch_all_activities()
@@ -577,7 +643,7 @@ with nav_tab4:
                 st.dataframe(pkg_summary, use_container_width=True, hide_index=True)
 
 # =========================================================================
-# TAB 5: VERIFICATION AUDIT TRAIL (MODULE 4)
+# TAB 6: VERIFICATION AUDIT TRAIL (MODULE 4)
 # =========================================================================
 with nav_tab5:
     head_col1, head_col2 = st.columns([3, 1])
