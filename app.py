@@ -122,14 +122,12 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("🌐 Field Connectivity & Settings")
     
-    # Offline Mode Simulator Toggle
     is_offline = st.checkbox("Simulate Offline Mode (Cache Local)", value=False)
     if is_offline:
         st.warning("⚠️ Offline Mode Active: Reports will be saved locally to IndexedDB/LocalStorage cache.")
     else:
         st.success("🟢 Online: Syncing live to central P6 server.")
 
-    # Multilingual Mode Selector
     target_lang = st.selectbox(
         "Supervisor Spoken Language",
         options=["English (en)", "Hindi (hi)", "Bengali (bn)", "Tamil (ta)", "Marathi (mr)"],
@@ -157,7 +155,6 @@ st.markdown("## 🌉 SETU AI (सेतु): Schedule Execution Tracking & Unifi
 st.caption("AI-Powered Bridge Connecting Field Execution to Master Primavera P6 Baselines | Oil India Limited")
 st.markdown("---")
 
-# 6 Main Tabs (Expanded with Field Supervisor Multi-Modal Mode)
 nav_tab1, nav_tab6_field, nav_tab2, nav_tab3, nav_tab4, nav_tab5 = st.tabs([
     "📊 Executive Delay Analytics (M6)",
     "👷 Site Supervisor Field Capture (M2)",
@@ -257,7 +254,9 @@ with nav_tab1:
 # =========================================================================
 with nav_tab6_field:
     st.subheader("👷 Site Supervisor Multi-Modal Field Capture")
-    st.write("Submit daily progress using voice notes, typed text, or photo proof. Metadata (GPS & timestamp) is automatically bound.")
+    st.write("Submit daily progress using voice notes, typed text, or photo proof, and link it directly to a master schedule activity.")
+
+    df_sched_options = fetch_all_activities()
 
     with st.form("field_capture_form"):
         col_input1, col_input2 = st.columns(2)
@@ -266,6 +265,16 @@ with nav_tab6_field:
             st.markdown("##### 🎙️ Voice & Text Reporting")
             audio_data = st.audio_input("Record voice update from site")
             text_fallback = st.text_area("Or type site observation manually:", placeholder="e.g., Poured 50m3 concrete for Foundation Pier 3...")
+            
+            st.markdown("##### 🔗 Target Schedule Activity Link")
+            if not df_sched_options.empty:
+                activity_choices = [
+                    f"{row['activity_id']} | {row['discipline']} | {row['activity_description']}" 
+                    for _, row in df_sched_options.iterrows()
+                ]
+                selected_task_str = st.selectbox("Select Target Activity ID for this Proof:", options=activity_choices)
+            else:
+                selected_task_str = None
             
         with col_input2:
             st.markdown("##### 📸 Visual Proof & Location")
@@ -282,49 +291,96 @@ with nav_tab6_field:
 
         if submit_report:
             processed_text = ""
+            saved_image_path = None
+            saved_audio_path = None
             
+            target_activity_id = selected_task_str.split(" | ")[0].strip() if selected_task_str else "UNKNOWN"
+            
+            task_discipline = "Civil & Structural"
+            if not df_sched_options.empty and target_activity_id != "UNKNOWN":
+                match_row = df_sched_options[df_sched_options["activity_id"] == target_activity_id]
+                if not match_row.empty:
+                    task_discipline = match_row.iloc[0]["discipline"]
+
+            os.makedirs("assets/uploads", exist_ok=True)
+            if photo_proof is not None:
+                saved_image_path = os.path.join("assets/uploads", f"cam_photo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg")
+                with open(saved_image_path, "wb") as f:
+                    f.write(photo_proof.getbuffer())
+            elif image_file is not None:
+                saved_image_path = os.path.join("assets/uploads", image_file.name)
+                with open(saved_image_path, "wb") as f:
+                    f.write(image_file.getbuffer())
+
             if audio_data is not None:
-                with st.spinner("Transcribing and translating audio via OpenAI Whisper..."):
+                saved_audio_path = os.path.join("assets/uploads", f"audio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav")
+                with open(saved_audio_path, "wb") as f:
+                    f.write(audio_data.getbuffer())
+
+            if audio_data is not None:
+                with st.spinner("Processing audio transcription..."):
                     processed_text = transcribe_site_audio(audio_data, language_code=lang_code)
-                    st.info(f"**Transcribed Audio Text:** {processed_text}")
             elif text_fallback:
                 processed_text = text_fallback
             else:
-                processed_text = "General progress update logged with visual proof."
+                processed_text = f"Progress update linked directly to activity {target_activity_id} with visual proof."
 
-            st.success(f"Successfully captured report! Timestamp: {current_timestamp} | GPS: {simulated_gps}")
-            if photo_proof or image_file:
-                st.image(photo_proof if photo_proof else image_file, caption="Verified Site Photo Proof Attached", width=300)
+            if "custom_field_submissions" not in st.session_state:
+                st.session_state["custom_field_submissions"] = []
+
+            st.session_state["custom_field_submissions"].insert(0, {
+                "report_date": datetime.now().strftime("%Y-%m-%d"),
+                "discipline": task_discipline,
+                "raw_text": processed_text,
+                "clean_activity": processed_text,
+                "event_type": "IN_PROGRESS",
+                "progress_pct": 50.0,
+                "preselected_activity_id": target_activity_id,
+                "language_code": lang_code,
+                "image_path": saved_image_path,
+                "audio_path": saved_audio_path
+            })
+
+            st.success(f"Successfully linked & transmitted report to Activity `{target_activity_id}`! Timestamp: {current_timestamp}")
+            if saved_image_path and os.path.exists(saved_image_path):
+                st.image(saved_image_path, caption="Verified Site Photo Proof Attached", width=300)
                 
             st.balloons()
 
 # =========================================================================
-# TAB 3: SITE REVIEW & AI MATCH QUEUE (MODULES 2, 3, 4 with Deduplication)
+# TAB 3: SITE REVIEW & AI MATCH QUEUE (MODULES 2, 3, 4 with Deduplication & Proof)
 # =========================================================================
 with nav_tab2:
     st.subheader("Extracted Site Events ➔ AI Candidate Matching")
     st.write("Site reports are automatically parsed and linked to planned L5/L6 activities. Review or confirm matches below.")
 
     raw_events = []
+    
+    # 1. Load custom supervisor field submissions first (so they appear at the top)
+    if "custom_field_submissions" in st.session_state and st.session_state["custom_field_submissions"]:
+        raw_events.extend(st.session_state["custom_field_submissions"])
+
+    # 2. Also load the pre-loaded default site diary so all sample events are visible underneath
+    default_txt = os.path.join("data", "daily_reports", "site_diary_2026_09_07.txt")
+    if os.path.exists(default_txt):
+        raw_events.extend(parse_text_diary(default_txt))
+
+    # 3. Handle user-uploaded site files from the sidebar if any
     if site_file is not None:
         temp_path = os.path.join("data", "daily_reports", site_file.name)
         with open(temp_path, "wb") as f:
             f.write(site_file.getbuffer())
         if site_file.name.endswith(".txt"):
-            raw_events = parse_text_diary(temp_path)
+            raw_events.extend(parse_text_diary(temp_path))
         elif site_file.name.endswith(".xlsx"):
-            raw_events = parse_excel_log(temp_path)
-    else:
-        default_txt = os.path.join("data", "daily_reports", "site_diary_2026_09_07.txt")
-        if os.path.exists(default_txt):
-            raw_events = parse_text_diary(default_txt)
-            st.info("💡 Displaying pre-loaded site diary: `site_diary_2026_09_07.txt`. Upload custom reports via the sidebar.")
+            raw_events.extend(parse_excel_log(temp_path))
 
     if not raw_events:
-        st.warning("No site updates detected. Please upload a report in the sidebar.")
+        st.warning("No site updates detected. Please upload a report in the sidebar or submit a field report in Tab 2.")
     else:
         df_sched = fetch_all_activities()
         reviewed_map = get_reviewed_events_map()
+        st.caption(f"Total events in review queue: {len(raw_events)}")
 
         for i, event in enumerate(raw_events):
             event_key = f"{event['report_date']}||{event['raw_text'].strip()}"
@@ -332,7 +388,7 @@ with nav_tab2:
             review_info = reviewed_map.get(event_key, {})
 
             candidates = matcher.match_activity(
-                event["clean_activity"],
+                event["clean_activity"] if "clean_activity" in event else event["raw_text"],
                 extracted_discipline=event["discipline"],
                 top_k=3
             )
@@ -349,13 +405,19 @@ with nav_tab2:
 
             status_tag = f" — [{review_info.get('decision', 'PROCESSED')}: {review_info.get('matched_activity_id', '')}]" if is_reviewed else f" — {conf}% Match"
 
-            with st.expander(f"Event #{i+1}: [{event['discipline']}] {event['clean_activity'][:50]}...{status_tag}", expanded=(i == 0 and not is_reviewed)):
+            disp_title = event.get('clean_activity', event['raw_text'])
+            with st.expander(f"Event #{i+1}: [{event['discipline']}] {disp_title[:50]}...{status_tag}", expanded=(i == 0 and not is_reviewed)):
                 c1, c2 = st.columns([1.2, 1])
 
                 with c1:
                     st.markdown("**Site Report Observation:**")
                     st.code(event["raw_text"], language="text")
                     st.write(f"📅 **Date:** `{event['report_date']}` | **Status:** `{event['event_type']}` | **Progress:** `{event['progress_pct']}%`")
+
+                    img_p = event.get("image_path")
+                    if img_p and os.path.exists(img_p):
+                        st.markdown("##### 📸 Attached Field Photo Proof")
+                        st.image(img_p, caption="Verified Site Capture", width=280)
 
                 with c2:
                     if is_reviewed:
@@ -388,49 +450,55 @@ with nav_tab2:
 
                     with act_col1:
                         if st.button("✓ Approve Match", key=f"app_btn_{i}", type="primary"):
-                            if selected_act_id:
+                            final_act_id = event.get("preselected_activity_id", selected_act_id)
+                            if final_act_id and final_act_id != "UNKNOWN":
                                 try:
-                                    matched_desc = top["activity_description"] if (top and top["activity_id"] == selected_act_id) else chosen_cand_str
+                                    matched_desc = top["activity_description"] if (top and top["activity_id"] == final_act_id) else chosen_cand_str
                                     
                                     log_audit_record({
                                         "report_date": event["report_date"],
                                         "discipline": event["discipline"],
                                         "raw_site_text": event["raw_text"],
-                                        "matched_activity_id": selected_act_id,
+                                        "matched_activity_id": final_act_id,
                                         "matched_description": matched_desc,
-                                        "confidence": conf,
+                                        "confidence": conf if "preselected_activity_id" not in event else 100.0,
                                         "event_type": event["event_type"],
                                         "reported_progress": event["progress_pct"],
                                         "decision": "APPROVED",
-                                        "reviewer_comments": "Approved via Planner Review Queue."
+                                        "reviewer_comments": "Approved via Planner Review Queue with attached proof.",
+                                        "image_path": event.get("image_path"),
+                                        "audio_path": event.get("audio_path")
                                     })
 
-                                    sync_res = sync_actual_progress(
-                                        activity_id=selected_act_id,
+                                    sync_actual_progress(
+                                        activity_id=final_act_id,
                                         report_date=event["report_date"],
                                         event_type=event["event_type"],
                                         progress_pct=event["progress_pct"]
                                     )
 
-                                    st.toast(f"✅ Approved & Synced: {selected_act_id}", icon="🚀")
+                                    st.toast(f"✅ Approved & Synced: {final_act_id}", icon="🚀")
                                     st.rerun()
                                 except Exception as err:
                                     st.error(f"Approval failed: {err}")
 
                     with act_col3:
                         if st.button("🚩 Reject / Unlink", key=f"rej_btn_{i}"):
+                            final_act_id = event.get("preselected_activity_id", "UNLINKED")
                             try:
                                 log_audit_record({
                                     "report_date": event["report_date"],
                                     "discipline": event["discipline"],
                                     "raw_site_text": event["raw_text"],
-                                    "matched_activity_id": "UNLINKED",
+                                    "matched_activity_id": final_act_id if final_act_id != "UNKNOWN" else "UNLINKED",
                                     "matched_description": "None",
                                     "confidence": conf,
                                     "event_type": event["event_type"],
                                     "reported_progress": event["progress_pct"],
                                     "decision": "REJECTED",
-                                    "reviewer_comments": "Flagged as unlinked by planner."
+                                    "reviewer_comments": "Flagged as unlinked by planner.",
+                                    "image_path": event.get("image_path"),
+                                    "audio_path": event.get("audio_path")
                                 })
                                 st.toast("Flagged as unlinked", icon="⚠️")
                                 st.rerun()
@@ -643,13 +711,13 @@ with nav_tab4:
                 st.dataframe(pkg_summary, use_container_width=True, hide_index=True)
 
 # =========================================================================
-# TAB 6: VERIFICATION AUDIT TRAIL (MODULE 4)
+# TAB 6: VERIFICATION AUDIT TRAIL (MODULE 4 - ENHANCED WITH PROOF VIEWER)
 # =========================================================================
 with nav_tab5:
     head_col1, head_col2 = st.columns([3, 1])
     with head_col1:
         st.subheader("Traceability & Human Approval Audit Trail")
-        st.caption("Immutable record of all site-to-schedule links confirmed or rejected by planners.")
+        st.caption("Immutable record of all site-to-schedule links confirmed or rejected by planners, complete with photo and audio proof.")
     with head_col2:
         if st.button("🗑️ Clear Audit Log", help="Resets the audit trail for fresh demo runs"):
             clear_audit_trail()
@@ -661,8 +729,36 @@ with nav_tab5:
     conn.close()
 
     if df_audit.empty:
-        st.info("No approval events recorded yet. Approve matches in Tab 2 to populate this log.")
+        st.info("No approval events recorded yet. Approve matches in Tab 3 to populate this log.")
     else:
+        for idx, row in df_audit.iterrows():
+            decision_badge = "✅ Approved" if row['decision'] == "APPROVED" else "🚩 Rejected"
+            
+            with st.expander(f"Audit #{row['audit_id']} | Task ID: `{row['matched_activity_id']}` | Status: {decision_badge} ({row['timestamp']})"):
+                ac1, ac2 = st.columns([1.5, 1])
+                
+                with ac1:
+                    st.markdown(f"**Discipline:** `{row['discipline']}` | **Report Date:** `{row['report_date']}`")
+                    st.markdown(f"**Matched Task Description:** {row['matched_description']}")
+                    st.markdown("**Site Observation / Voice Note Text:**")
+                    st.code(row['raw_site_text'], language="text")
+                    st.write(f"💬 **Reviewer Comments:** {row.get('reviewer_comments', 'None')}")
+
+                with ac2:
+                    st.markdown("##### 📸 Attached Proof of Work")
+                    img_path = row.get("image_path")
+                    if img_path and os.path.exists(img_path):
+                        st.image(img_path, caption=f"Proof for {row['matched_activity_id']}", width=250)
+                    else:
+                        st.caption("No image proof attached to this entry.")
+                        
+                    audio_path = row.get("audio_path")
+                    if audio_path and os.path.exists(audio_path):
+                        st.markdown("##### 🎙️ Audio Recording")
+                        st.audio(audio_path)
+
+        st.markdown("---")
+        st.markdown("### 📋 Complete Audit Log Table")
         st.dataframe(
             df_audit[[
                 "audit_id",
@@ -673,7 +769,8 @@ with nav_tab5:
                 "confidence",
                 "decision",
                 "raw_site_text",
-                "reviewer_comments"
+                "reviewer_comments",
+                "image_path"
             ]],
             use_container_width=True,
             hide_index=True

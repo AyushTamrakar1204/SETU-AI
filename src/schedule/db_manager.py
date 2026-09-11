@@ -52,7 +52,7 @@ def init_db(db_path=DEFAULT_DB_PATH):
     );
     """)
 
-    # 2. Human-in-the-Loop Audit Trail Table
+    # 2. Human-in-the-Loop Audit Trail Table (Updated with media paths)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS activity_updates_audit (
         audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,6 +66,8 @@ def init_db(db_path=DEFAULT_DB_PATH):
         reported_progress REAL,
         decision TEXT NOT NULL,          -- 'APPROVED', 'MANUAL_OVERRIDE', 'REJECTED'
         reviewer_comments TEXT,
+        image_path TEXT,                 -- Path to saved site photo proof
+        audio_path TEXT,                 -- Path to saved site audio recording
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """)
@@ -90,11 +92,9 @@ def normalize_column_name(col: str) -> str:
 
 def validate_schedule_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """Validates schema, normalizes column names, strips whitespace, and ensures valid ISO date strings."""
-    # 1. Normalize existing column names to snake_case
     col_mapping = {col: normalize_column_name(col) for col in df.columns}
     df = df.rename(columns=col_mapping)
 
-    # 2. Check missing mandatory columns
     missing = [col for col in REQUIRED_COLUMNS if col not in df.columns]
     if missing:
         raise ValueError(
@@ -104,12 +104,10 @@ def validate_schedule_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df[REQUIRED_COLUMNS].copy()
 
-    # 3. Clean text fields
     text_cols = ["activity_id", "level", "discipline", "wbs_package", "activity_description", "baseline_status"]
     for col in text_cols:
         df[col] = df[col].astype(str).str.strip()
 
-    # 4. Validate dates (YYYY-MM-DD)
     for col in ["planned_start", "planned_finish"]:
         parsed_dates = pd.to_datetime(df[col], errors="coerce")
         if parsed_dates.isna().any():
@@ -124,7 +122,6 @@ def ingest_schedule_file(file_path: str, db_path=DEFAULT_DB_PATH) -> int:
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
 
-    # Read based on extension
     if file_path.endswith(".csv"):
         df = pd.read_csv(file_path)
     elif file_path.endswith((".xlsx", ".xls")):
@@ -170,15 +167,15 @@ def fetch_all_activities(db_path=DEFAULT_DB_PATH) -> pd.DataFrame:
     return df
 
 def log_audit_record(record: dict, db_path=DEFAULT_DB_PATH):
-    """Logs an approved or reviewed progress record into the audit table."""
+    """Logs an approved or reviewed progress record into the audit table with optional media paths."""
     conn = get_db_connection(db_path)
     cursor = conn.cursor()
     cursor.execute("""
     INSERT INTO activity_updates_audit (
         report_date, discipline, raw_site_text, matched_activity_id,
         matched_description, confidence, event_type, reported_progress,
-        decision, reviewer_comments
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        decision, reviewer_comments, image_path, audio_path
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         record["report_date"],
         record["discipline"],
@@ -189,7 +186,9 @@ def log_audit_record(record: dict, db_path=DEFAULT_DB_PATH):
         record["event_type"],
         record.get("reported_progress", 0.0),
         record.get("decision", "APPROVED"),
-        record.get("reviewer_comments", "")
+        record.get("reviewer_comments", ""),
+        record.get("image_path", None),
+        record.get("audio_path", None)
     ))
     conn.commit()
     conn.close()
@@ -202,7 +201,6 @@ def sync_actual_progress(activity_id: str, report_date: str, event_type: str, pr
     conn = get_db_connection(db_path)
     cursor = conn.cursor()
 
-    # Fetch existing baseline data
     cursor.execute(
         "SELECT planned_start, planned_finish, actual_start, actual_finish FROM planned_activities WHERE activity_id = ?",
         (activity_id,)
@@ -222,21 +220,17 @@ def sync_actual_progress(activity_id: str, report_date: str, event_type: str, pr
     act_finish = existing_act_finish
     new_status = "IN_PROGRESS"
 
-    event_date = datetime.strptime(report_date, "%Y-%m-%d")
-
-    # Update lifecycle based on reported event
     if event_type in ["STARTED", "IN_PROGRESS"]:
         if not act_start:
             act_start = report_date
         new_status = "IN_PROGRESS"
     elif event_type == "COMPLETED":
         if not act_start:
-            act_start = row["planned_start"]  # fallback if start event was missed
+            act_start = row["planned_start"]
         act_finish = report_date
         progress_pct = 100.0
         new_status = "COMPLETED"
 
-    # Execute DB update
     cursor.execute("""
     UPDATE planned_activities SET
         actual_start = ?,
@@ -249,7 +243,6 @@ def sync_actual_progress(activity_id: str, report_date: str, event_type: str, pr
     conn.commit()
     conn.close()
 
-    # Compute Variances
     start_var_days = None
     finish_var_days = None
 
@@ -271,10 +264,6 @@ def sync_actual_progress(activity_id: str, report_date: str, event_type: str, pr
     }
 
 def get_reviewed_events_map(db_path=DEFAULT_DB_PATH) -> dict:
-    """
-    Returns a dictionary mapping (report_date, raw_site_text) to review record.
-    Used to disable already-reviewed items in the review queue.
-    """
     conn = get_db_connection(db_path)
     cursor = conn.cursor()
     cursor.execute("SELECT report_date, raw_site_text, matched_activity_id, decision FROM activity_updates_audit")
@@ -290,9 +279,7 @@ def get_reviewed_events_map(db_path=DEFAULT_DB_PATH) -> dict:
         }
     return reviewed
 
-
 def clear_audit_trail(db_path=DEFAULT_DB_PATH):
-    """Clears the verification audit log table for demo reset."""
     conn = get_db_connection(db_path)
     cursor = conn.cursor()
     cursor.execute("DELETE FROM activity_updates_audit")
@@ -303,7 +290,5 @@ if __name__ == "__main__":
     init_db()
     sample_file = os.path.join("data", "schedule", "project_schedule.xlsx")
     ingest_schedule_file(sample_file)
-    
-    # Query check
     df_loaded = fetch_all_activities()
     print(f"[OK] Verified: {len(df_loaded)} rows read back from SQLite.")

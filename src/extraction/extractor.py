@@ -1,6 +1,7 @@
 """
 OIL-Track AI - Module 2
-extractor.py: Parses free-text and tabular site reports into structured event data.
+extractor.py: Parses free-text and tabular site reports into structured event data 
+with intelligent engineering terminology normalization.
 """
 
 import os
@@ -33,12 +34,41 @@ def detect_status(text: str) -> str:
                 return status
     return "UNKNOWN"
 
+def normalize_field_jargon(text: str) -> str:
+    """
+    Normalizes common site slang/jargon into standard L5/L6 engineering terminology 
+    to bridge vocabulary gaps and ensure high organic AI matching confidence.
+    """
+    normalized = text.lower()
+    
+    # Construction vocabulary dictionary for Oil & Gas projects
+    jargon_map = {
+        "rebar": "reinforcement work",
+        "shuttering": "formwork",
+        "pcc": "plain cement concrete foundation",
+        "cc": "concrete pouring",
+        "exc": "excavation",
+        "sleeper": "sleeper foundations",
+        "ms line": "pipeline erection and welding",
+        "hydro": "hydrotesting"
+    }
+    
+    for jargon, formal in jargon_map.items():
+        # Match whole words or phrase patterns
+        normalized = re.sub(rf"\b{jargon}\b", formal, normalized)
+        
+    return normalized
+
 def clean_action_text(text: str, discipline: str) -> str:
-    """Removes the discipline prefix and numbers from the raw text."""
+    """Removes discipline prefixes, numbers, and normalizes field jargon for the AI matcher."""
     # Remove leading numbers and bullets (e.g., "1. ", "- ")
     clean = re.sub(r"^[\d\.\-\s]+", "", text)
     # Remove the discipline name if it starts the sentence (e.g., "Civil Discipline: ")
     clean = re.sub(rf"(?i)^{discipline}\s*(discipline)?\s*:\s*", "", clean)
+    
+    # Normalize field jargon into formal engineering terms for accurate semantic matching
+    clean = normalize_field_jargon(clean)
+    
     return clean.strip()
 
 def parse_text_diary(file_path: str) -> list[dict]:
@@ -87,15 +117,12 @@ def parse_excel_log(file_path: str) -> list[dict]:
     df = pd.read_excel(file_path, engine="openpyxl")
 
     for _, row in df.iterrows():
-        # Excel gives us clean columns, we just map them
         raw_text = str(row.get("Work Description", ""))
         discipline = str(row.get("Discipline", detect_discipline(raw_text)))
         status_raw = str(row.get("Reported Status", ""))
         
-        # Determine strict status
         status = detect_status(status_raw + " " + raw_text)
         
-        # Parse progress safely (e.g., "40%" -> 40.0)
         prog_str = str(row.get("Estimated Progress", "0")).replace("%", "")
         try:
             progress = float(prog_str)
@@ -104,7 +131,7 @@ def parse_excel_log(file_path: str) -> list[dict]:
 
         events.append({
             "source_type": "Excel Log",
-            "report_date": str(row.get("Date", "Unknown"))[:10], # Keep YYYY-MM-DD
+            "report_date": str(row.get("Date", "Unknown"))[:10],
             "discipline": discipline.strip(),
             "raw_text": raw_text,
             "clean_activity": clean_action_text(raw_text, discipline),
